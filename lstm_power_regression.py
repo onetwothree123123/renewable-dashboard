@@ -104,5 +104,10 @@ plt.show()
 
 print("모델과 데이터셋 저장 중...")
 torch.save(model.state_dict(), "lstm_power_model.pth")
-torch.save(dataset, "weather_dataset.pt")
+torch.save({
+    'X_mean': dataset.X_mean,
+    'X_std': dataset.X_std,
+    'y_mean': dataset.y_mean,
+    'y_std': dataset.y_std,
+}, 'normalization_stats.pt')
 print("저장 완료!")
