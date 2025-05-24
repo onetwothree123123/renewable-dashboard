@@ -1,121 +1,13 @@
+import streamlit as st
 import numpy as np
-import pandas as pd
 import torch
-from torch.utils.data import Dataset, DataLoader
-import torch.nn as nn
 import matplotlib.pyplot as plt
 import requests
 import math
 from datetime import datetime
+from lstm_power_regression import LSTMRegressor, WeatherPowerDataset
 
-# 1. 샘플 날씨 데이터 생성 (168시간 = 7일치)
-np.random.seed(42)
-hours = 168
-temperature = 10 + 10 * np.sin(np.linspace(0, 3 * np.pi, hours)) + np.random.normal(0, 1, hours)
-wind_speed = 3 + 2 * np.cos(np.linspace(0, 2 * np.pi, hours)) + np.random.normal(0, 0.5, hours)
-sunshine = np.clip(6 * np.sin(np.linspace(0, 2 * np.pi, hours)) + 6, 0, 12)
-
-# 발전량(W) = 풍속 기반 공식 + 태양광 계수 + noise
-power_output = (
-    0.5 * 1.225 * 10.0 * (wind_speed ** 3) * 0.3
-    + sunshine * 50
-    + np.random.normal(0, 100, hours)
-)
-
-df_sample = pd.DataFrame({
-    "temperature": temperature,
-    "wind_speed": wind_speed,
-    "sunshine_duration": sunshine,
-    "power_output": power_output
-})
-
-# 2. PyTorch Dataset 구성
-SEQ_LEN = 24
-
-class WeatherPowerDataset(Dataset):
-    def __init__(self, df, seq_len=24):
-        self.inputs = []
-        self.targets = []
-        data = df[["temperature", "wind_speed", "sunshine_duration"]].values
-        labels = df["power_output"].values
-        self.X_mean = data.mean(axis=0)
-        self.X_std = data.std(axis=0)
-        self.y_mean = labels.mean()
-        self.y_std = labels.std()
-
-        data = (data - self.X_mean) / self.X_std
-        labels = (labels - self.y_mean) / self.y_std
-
-        for i in range(len(df) - seq_len):
-            self.inputs.append(data[i:i+seq_len])
-            self.targets.append(labels[i+seq_len])
-        self.inputs = torch.tensor(self.inputs, dtype=torch.float32)
-        self.targets = torch.tensor(self.targets, dtype=torch.float32).unsqueeze(1)
-
-    def __len__(self):
-        return len(self.targets)
-
-    def __getitem__(self, idx):
-        return self.inputs[idx], self.targets[idx]
-
-    def denormalize(self, y_tensor):
-        return y_tensor * self.y_std + self.y_mean
-
-# 3. LSTM 모델 정의
-class LSTMRegressor(nn.Module):
-    def __init__(self, input_size=3, hidden_size=64):
-        super().__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, batch_first=True)
-        self.fc = nn.Linear(hidden_size, 1)
-
-    def forward(self, x):
-        _, (h_n, _) = self.lstm(x)
-        return self.fc(h_n[-1])
-
-# 4. 학습 루프
-model = LSTMRegressor()
-criterion = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-
-dataset = WeatherPowerDataset(df_sample, SEQ_LEN)
-dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
-
-EPOCHS = 100
-losses = []
-
-for epoch in range(EPOCHS):
-    epoch_loss = 0.0
-    for x_batch, y_batch in dataloader:
-        pred = model(x_batch)
-        loss = criterion(pred, y_batch)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        epoch_loss += loss.item()
-    losses.append(epoch_loss / len(dataloader))
-
-# 5. 예측 테스트 (학습용 전체 데이터 예측)
-model.eval()
-X_all = torch.tensor(df_sample[["temperature", "wind_speed", "sunshine_duration"]].values, dtype=torch.float32)
-X_seq = torch.stack([X_all[i:i+SEQ_LEN] for i in range(len(df_sample)-SEQ_LEN)])
-with torch.no_grad():
-    y_pred = model(X_seq).squeeze().numpy()
-
-y_true = df_sample["power_output"].values[SEQ_LEN:]
-
-# 결과 시각화
-plt.figure(figsize=(12,5))
-plt.plot(y_true, label='True Power Output')
-plt.plot(y_pred, label='Predicted Power Output')
-plt.legend()
-plt.title("🔋 발전량 예측: 샘플 시계열 기반 LSTM")
-plt.xlabel("시간 Index")
-plt.ylabel("Watt")
-plt.grid(True)
-plt.tight_layout()
-plt.show()
-
-# 6. 실시간 예보 기반 예측 함수 (Open-Meteo 활용)
+# 실시간 예측 함수 정의
 def get_forecast_and_predict(model, dataset, latitude=37.5665, longitude=126.9780, hours=24):
     base_url = "https://api.open-meteo.com/v1/forecast"
     params = {
@@ -152,3 +44,36 @@ def get_forecast_and_predict(model, dataset, latitude=37.5665, longitude=126.978
         y_pred = dataset.denormalize(torch.tensor(y_pred)).numpy()
 
     return y_pred
+
+# 모델 및 데이터셋 로드
+model = LSTMRegressor()
+model.load_state_dict(torch.load("lstm_power_model.pth", map_location=torch.device('cpu')))
+model.eval()
+
+dataset = torch.load("weather_dataset.pt", map_location=torch.device('cpu'))
+
+# Streamlit 대시보드 구성
+st.set_page_config(page_title="AI 신재생에너지 예측", layout="wide")
+st.title("🔋 신재생에너지 발전량 예측 대시보드")
+
+st.markdown("""
+이 대시보드는 **Open-Meteo API**로부터 실시간 기상 데이터를 가져오고,
+학습된 **LSTM 모델**을 활용해 향후 발전량을 예측합니다.
+
+- 입력: 기온, 풍속, 구름량
+- 출력: 예측 발전량 (태양광 + 풍력)
+""")
+
+if st.button("📡 실시간 기상 예보 기반 발전량 예측 시작"):
+    try:
+        predictions = get_forecast_and_predict(model, dataset)
+        st.subheader("📈 24시간 예측 발전량 (Watt)")
+        st.line_chart(predictions)
+    except Exception as e:
+        st.error(f"예측 중 오류 발생: {e}")
+
+st.markdown("""
+---
+**사용된 모델:** LSTM (Long Short-Term Memory)\
+**기상 API:** [Open-Meteo](https://open-meteo.com/)
+""")
