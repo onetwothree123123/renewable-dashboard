@@ -12,7 +12,6 @@ temperature = 10 + 10 * np.sin(np.linspace(0, 3 * np.pi, hours)) + np.random.nor
 wind_speed = 3 + 2 * np.cos(np.linspace(0, 2 * np.pi, hours)) + np.random.normal(0, 0.5, hours)
 sunshine = np.clip(6 * np.sin(np.linspace(0, 2 * np.pi, hours)) + 6, 0, 12)
 
-# 발전량(W) = 풍속 기반 공식 + 태양광 계수 + noise
 power_output = (
     0.5 * 1.225 * 10.0 * (wind_speed ** 3) * 0.3
     + sunshine * 50
@@ -35,20 +34,27 @@ class WeatherPowerDataset(Dataset):
         self.targets = []
         data = df[["temperature", "wind_speed", "sunshine_duration"]].values
         labels = df["power_output"].values
+
+        self.X_mean = data.mean(axis=0)
+        self.X_std = data.std(axis=0)
+        self.y_mean = labels.mean()
+        self.y_std = labels.std()
+
+        data = (data - self.X_mean) / self.X_std
+        labels = (labels - self.y_mean) / self.y_std
+
         for i in range(len(df) - seq_len):
             self.inputs.append(data[i:i+seq_len])
             self.targets.append(labels[i+seq_len])
-        self.inputs = torch.tensor(self.inputs, dtype=torch.float32)
-        self.targets = torch.tensor(self.targets, dtype=torch.float32).unsqueeze(1)
+
+        self.inputs = torch.tensor(np.array(self.inputs), dtype=torch.float32)
+        self.targets = torch.tensor(np.array(self.targets), dtype=torch.float32).unsqueeze(1)
 
     def __len__(self):
         return len(self.targets)
 
     def __getitem__(self, idx):
         return self.inputs[idx], self.targets[idx]
-
-dataset = WeatherPowerDataset(df_sample, SEQ_LEN)
-dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
 
 # 3. LSTM 모델 정의
 class LSTMRegressor(nn.Module):
@@ -61,14 +67,15 @@ class LSTMRegressor(nn.Module):
         _, (h_n, _) = self.lstm(x)
         return self.fc(h_n[-1])
 
+# 4. 학습 실행
 model = LSTMRegressor()
+dataset = WeatherPowerDataset(df_sample, SEQ_LEN)
+dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
+
 criterion = nn.MSELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-# 4. 학습
 EPOCHS = 100
-losses = []
-
 for epoch in range(EPOCHS):
     epoch_loss = 0.0
     for x_batch, y_batch in dataloader:
@@ -78,36 +85,15 @@ for epoch in range(EPOCHS):
         loss.backward()
         optimizer.step()
         epoch_loss += loss.item()
-    losses.append(epoch_loss / len(dataloader))
+    print(f"[Epoch {epoch+1}] Loss: {epoch_loss / len(dataloader):.4f}")
 
-# 5. 예측 테스트 (학습용 전체 데이터 예측)
-model.eval()
-X_all = torch.tensor(df_sample[["temperature", "wind_speed", "sunshine_duration"]].values, dtype=torch.float32)
-X_seq = torch.stack([X_all[i:i+SEQ_LEN] for i in range(len(df_sample)-SEQ_LEN)])
-with torch.no_grad():
-    y_pred = model(X_seq).squeeze().numpy()
-
-# 실제 값 비교용
-y_true = df_sample["power_output"].values[SEQ_LEN:]
-
-# 결과 시각화
-plt.figure(figsize=(12,5))
-plt.plot(y_true, label='True Power Output')
-plt.plot(y_pred, label='Predicted Power Output')
-plt.legend()
-plt.title("🔋 발전량 예측: 샘플 시계열 기반 LSTM")
-plt.xlabel("시간 Index")
-plt.ylabel("Watt")
-plt.grid(True)
-plt.tight_layout()
-plt.show()
-
-print("모델과 데이터셋 저장 중...")
+# 5. 모델 저장
 torch.save(model.state_dict(), "lstm_power_model.pth")
 torch.save({
     'X_mean': dataset.X_mean,
     'X_std': dataset.X_std,
     'y_mean': dataset.y_mean,
-    'y_std': dataset.y_std,
-}, 'normalization_stats.pt')
-print("저장 완료!")
+    'y_std': dataset.y_std
+}, "normalization_stats.pt")
+
+print("✅ 모델 및 정규화 통계 저장 완료")
